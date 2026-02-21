@@ -1,0 +1,267 @@
+# Helm values for argo-ci-trigger chart
+# Deploy with:
+#   helm install ip-whitelist-ci oci://docker.io/anisimovdk/argo-ci-trigger \
+#     --version 0.1.1 -f argo-ci.yaml
+#
+# Prerequisites:
+#   helm install argo-ci oci://docker.io/anisimovdk/argo-ci --version 0.1.0
+#
+# Required Doppler secrets (ARGO_CI_* keys):
+#   ARGO_CI_WEBHOOK_TOKEN  — GitHub webhook HMAC token
+#   ARGO_CI_GITHUB_TOKEN   — GitHub PAT (repo + write:packages)
+#   ARGO_CI_REGISTRY_USER  — Docker Hub username
+#   ARGO_CI_REGISTRY_PASS  — Docker Hub access token
+
+host: "argo-ci.cl.anisimov.dk"
+
+eventSource:
+  github:
+    repository: "anisimovdk/ip-whitelist-by-country"
+    events:
+      - push
+    filter:
+      # Fire only on tag pushes matching v*
+      expression: "body.ref != nil && body.ref startsWith 'refs/tags/v'"
+
+sensor:
+  workflowArguments:
+    - name: repo_url
+    - name: revision
+    - name: tag
+  parameterMapping:
+    - src:
+        dependencyName: dep
+        dataKey: body.repository.clone_url
+      dest: spec.arguments.parameters.0.value
+    - src:
+        dependencyName: dep
+        dataKey: body.after
+      dest: spec.arguments.parameters.1.value
+    # Strip "refs/tags/" prefix so tag = "v1.2.3"
+    - src:
+        dependencyName: dep
+        dataTemplate: '{{ trimPrefix "refs/tags/" .Input.body.ref }}'
+      dest: spec.arguments.parameters.2.value
+
+externalSecrets:
+  webhook-secret:
+    create: true
+    data:
+      token:
+        key: ARGO_CI_WEBHOOK_TOKEN
+
+  api-token:
+    create: true
+    data:
+      token:
+        key: ARGO_CI_GITHUB_TOKEN
+
+  docker-hub-credentials:
+    create: true
+    data:
+      username:
+        key: ARGO_CI_REGISTRY_USER
+      password:
+        key: ARGO_CI_REGISTRY_PASS
+
+workflowTemplate:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: repo_url
+      - name: revision
+      - name: tag
+
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: clone
+            template: git-clone
+
+          - name: test
+            depends: "clone"
+            template: go-test
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.clone.outputs.artifacts.source}}"
+
+          # Build versioned binaries once; release and docker share the same artifact
+          - name: build-release
+            depends: "test"
+            template: build-release
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.clone.outputs.artifacts.source}}"
+
+          # release and docker run in parallel after build-release
+          - name: release
+            depends: "build-release"
+            template: github-release
+            arguments:
+              artifacts:
+                - name: binaries
+                  from: "{{tasks.build-release.outputs.artifacts.binaries}}"
+
+          - name: docker
+            depends: "build-release"
+            template: docker-build-push
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.clone.outputs.artifacts.source}}"
+                - name: binaries
+                  from: "{{tasks.build-release.outputs.artifacts.binaries}}"
+
+    # ── 1. Clone ─────────────────────────────────────────────────────────────
+    - name: git-clone
+      container:
+        image: alpine/git:latest
+        command: [sh, -c]
+        args:
+          - |
+            git clone "{{workflow.parameters.repo_url}}" /src
+            git -C /src checkout "refs/tags/{{workflow.parameters.tag}}"
+      outputs:
+        artifacts:
+          - name: source
+            path: /src
+
+    # ── 2. Test ───────────────────────────────────────────────────────────────
+    - name: go-test
+      inputs:
+        artifacts:
+          - name: source
+            path: /src
+      container:
+        image: golang:1.26-alpine
+        workingDir: /src
+        command: [sh, -c]
+        args:
+          - apk add --no-cache make git gcc musl-dev && make ci
+
+    # ── 3. Build Release Binaries ────────────────────────────────────────────
+    # Compiles versioned multi-arch binaries once; the artifact is shared with
+    # both github-release and docker-build-push to guarantee identical binaries.
+    - name: build-release
+      inputs:
+        artifacts:
+          - name: source
+            path: /src
+      container:
+        image: golang:1.26-alpine
+        workingDir: /src
+        command: [sh, -c]
+        args:
+          - |
+            apk add --no-cache make git
+            VERSION="{{workflow.parameters.tag}}" \
+            GIT_COMMIT="$(git -C /src rev-parse HEAD)" \
+            BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            GO_VERSION="go1.26" \
+            make release-build
+      outputs:
+        artifacts:
+          - name: binaries
+            path: /src/release
+
+    # ── 4. GitHub Release ─────────────────────────────────────────────────────
+    # Attaches the pre-built versioned binaries to a GitHub release.
+    - name: github-release
+      inputs:
+        artifacts:
+          - name: binaries
+            path: /release
+      container:
+        image: alpine:latest
+        env:
+          - name: GITHUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                # auto-rewritten to <release>-api-token by the chart
+                name: api-token
+                key: token
+        command: [sh, -c]
+        args:
+          - |
+            apk add --no-cache github-cli
+
+            TAG="{{workflow.parameters.tag}}"
+
+            if gh release view "$TAG" \
+                --repo anisimovdk/ip-whitelist-by-country >/dev/null 2>&1; then
+              echo "Release $TAG already exists, skipping"
+              exit 0
+            fi
+
+            gh release create "$TAG" /release/* \
+              --repo anisimovdk/ip-whitelist-by-country \
+              --title "$TAG" \
+              --generate-notes
+
+    # ── 5. Docker Build & Push (Buildah rootless, no privileged containers) ───
+    # Builds a multi-arch manifest list using pre-built binaries (--target prebuilt).
+    # Each platform is built separately then assembled into a manifest and pushed.
+    - name: docker-build-push
+      inputs:
+        artifacts:
+          - name: source
+            path: /src
+          - name: binaries
+            path: /src/release
+      container:
+        image: quay.io/buildah/stable
+        command: [sh, -c]
+        args:
+          - |
+            set -eu
+            TAG="{{workflow.parameters.tag}}"
+            REPO="docker.io/anisimovdk/ip-whitelist-by-country"
+
+            buildah login -u "$DOCKER_USERNAME" -p "$DOCKER_PASSWORD" docker.io
+
+            # --isolation=chroot avoids user-namespace/remount syscalls entirely;
+            # --storage-driver vfs overrides any config file that might pick overlay.
+            # Single invocation builds all platforms and populates the manifest list.
+            buildah --storage-driver vfs build \
+              --isolation chroot \
+              --platform linux/amd64,linux/arm64,linux/arm/v7 \
+              --build-arg "VERSION=${TAG}" \
+              --build-arg "GIT_COMMIT={{workflow.parameters.revision}}" \
+              --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --build-arg "GO_VERSION=go1.26" \
+              --file /src/Dockerfile.ci \
+              --manifest "${REPO}:${TAG}" \
+              /src
+
+            # Push the manifest list to both the version tag and :latest
+            buildah --storage-driver vfs manifest push --all "${REPO}:${TAG}" "docker://${REPO}:${TAG}"
+            buildah --storage-driver vfs manifest push --all "${REPO}:${TAG}" "docker://${REPO}:latest"
+        env:
+          - name: STORAGE_DRIVER
+            value: vfs
+          - name: BUILDAH_FORMAT
+            value: docker
+          - name: BUILDAH_ISOLATION
+            value: chroot
+          - name: DOCKER_USERNAME
+            valueFrom:
+              secretKeyRef:
+                # auto-rewritten to <release>-docker-hub-credentials by the chart
+                name: docker-hub-credentials
+                key: username
+          - name: DOCKER_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: docker-hub-credentials
+                key: password
+        securityContext:
+          # Disable AppArmor so buildah can remount the rootfs when committing
+          # image layers (containers/buildah#4920). appArmorProfile is GA in
+          # k8s 1.30+; the legacy annotation above covers older clusters.
+          appArmorProfile:
+            type: Unconfined
+          seccompProfile:
+            type: Unconfined

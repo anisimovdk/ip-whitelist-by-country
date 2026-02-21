@@ -1,0 +1,33 @@
+# Prebuilt final image — used by argo-ci.
+# Copies pre-built versioned binaries from the release/ directory.
+# TARGETARCH=arm + TARGETVARIANT=v7 → "armv7", matching the Makefile naming convention.
+# Build with: docker build -f Dockerfile.ci --build-arg TARGETARCH=amd64 --build-arg VERSION=v1.2.3 .
+FROM alpine
+
+ARG TARGETARCH
+ARG TARGETVARIANT
+ARG VERSION=dev
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+ARG GO_VERSION=unknown
+
+LABEL org.opencontainers.image.title="IP Whitelist by Country"
+LABEL org.opencontainers.image.description="A service that provides IP network lists filtered by country"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.source="https://github.com/anisimovdk/ip-whitelist-by-country"
+LABEL org.opencontainers.image.url="https://github.com/anisimovdk/ip-whitelist-by-country"
+LABEL org.opencontainers.image.documentation="https://github.com/anisimovdk/ip-whitelist-by-country/blob/main/README.md"
+LABEL org.opencontainers.image.vendor="anisimovdk"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.ref.name="${VERSION}"
+LABEL go.version="${GO_VERSION}"
+
+RUN apk add --no-cache ca-certificates
+
+COPY release/ip-whitelist-linux-${TARGETARCH}${TARGETVARIANT}-${VERSION} /app/ip-whitelist
+
+EXPOSE 8080
+ENTRYPOINT ["/app/ip-whitelist"]
+CMD ["--port=8080"]
