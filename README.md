@@ -16,8 +16,11 @@ A lightweight Go service that provides IP address ranges (CIDR blocks) for any c
   - [Installation](#installation)
     - [Pre-built Binaries](#pre-built-binaries)
     - [Docker](#docker)
-      - [Docker Environment Variables](#docker-environment-variables)
+  - [Configuration](#configuration)
   - [Usage](#usage)
+    - [Without authentication](#without-authentication)
+    - [With authentication](#with-authentication)
+    - [Country codes](#country-codes)
   - [Development](#development)
     - [Prerequisites](#prerequisites)
     - [Running from Source](#running-from-source)
@@ -39,41 +42,41 @@ Download the latest release from the [GitHub Releases](https://github.com/anisim
 
 Each release includes versioned binaries for Linux platforms:
 
-- `ip-whitelist-linux-amd64-v1.2.3` - Linux x86_64
-- `ip-whitelist-linux-arm64-v1.2.3` - Linux ARM64
-- `ip-whitelist-linux-armv7-v1.2.3` - Linux ARM v7
+- `ip-whitelist-linux-amd64-v0.1.0` - Linux x86_64
+- `ip-whitelist-linux-arm64-v0.1.0` - Linux ARM64
+- `ip-whitelist-linux-armv7-v0.1.0` - Linux ARM v7
 - `checksums.txt` - SHA256 checksums for verification
 
 Download and verify:
 
 ```bash
 # Download binary and checksums
-wget https://github.com/anisimovdk/ip-whitelist-by-country/releases/download/v1.2.3/ip-whitelist-linux-amd64-v1.2.3
-wget https://github.com/anisimovdk/ip-whitelist-by-country/releases/download/v1.2.3/checksums.txt
+wget https://github.com/anisimovdk/ip-whitelist-by-country/releases/download/v0.1.0/ip-whitelist-linux-amd64-v0.1.0
+wget https://github.com/anisimovdk/ip-whitelist-by-country/releases/download/v0.1.0/checksums.txt
 
 # Verify checksum
 sha256sum -c --ignore-missing checksums.txt
 
 # Make executable
-chmod +x ip-whitelist-linux-amd64-v1.2.3
+chmod +x ip-whitelist-linux-amd64-v0.1.0
 
 # Run
-./ip-whitelist-linux-amd64-v1.2.3 --version
+./ip-whitelist-linux-amd64-v0.1.0 --version
 ```
 
 ### Docker
 
-Multi-architecture Docker images are automatically published to Docker Hub:
+Multi-architecture Docker images are automatically published to [Docker Hub](https://hub.docker.com/r/anisimovdk/ip-whitelist-by-country):
 
 ```bash
 # Pull the latest release
 docker pull anisimovdk/ip-whitelist-by-country:latest
 
 # Pull a specific version
-docker pull anisimovdk/ip-whitelist-by-country:v1.2.3
+docker pull anisimovdk/ip-whitelist-by-country:v0.1.0
 
 # Run
-docker run -p 8080:8080 anisimovdk/ip-whitelist-by-country:v1.2.3
+docker run -p 8080:8080 anisimovdk/ip-whitelist-by-country:v0.1.0
 ```
 
 Supported architectures:
@@ -84,22 +87,33 @@ Supported architectures:
 
 Docker will automatically pull the correct architecture for your platform.
 
-#### Docker Environment Variables
+See [Configuration](#configuration) for all available parameters.
 
-Configure the application using environment variables:
+## Configuration
 
-- `PORT` - Server port (default: 8080)
-- `AUTH_TOKEN` - Authentication token (optional)
-- `CACHE_DURATION` - Cache duration (default: 1h)
+All parameters can be set via CLI flags or environment variables:
 
-Example:
+| Parameter | CLI Flag | Env Variable | Default | Description |
+|-----------|----------|--------------|---------|-------------|
+| Port | `--port` | `SERVER_PORT` | `8080` | Port the HTTP server listens on |
+| Auth Token | `--auth-token` | `AUTH_TOKEN` | _(empty)_ | Secret token for API authentication. Leave empty to disable auth |
+| Cache Duration | `--cache-duration` | `CACHE_DURATION` | `1h` | How long to cache RIPE NCC data in memory (e.g. `30m`, `2h`, `24h`) |
+| Version | `--version`, `-v` | — | — | Print version information and exit |
+
+Example with Docker:
 
 ```bash
 docker run -p 8080:8080 \
-  -e PORT=8080 \
+  -e SERVER_PORT=8080 \
   -e AUTH_TOKEN=your-secret-token \
   -e CACHE_DURATION=30m \
   anisimovdk/ip-whitelist-by-country:latest
+```
+
+Example with binary:
+
+```bash
+./ip-whitelist --port=8080 --auth-token=your-secret-token --cache-duration=30m
 ```
 
 ## Usage
@@ -107,18 +121,32 @@ docker run -p 8080:8080 \
 The application exposes a REST API:
 
 - `GET /` - Returns a status message
-- `GET /get?country=XX&auth=your-token` - Returns a list of IP networks for the specified country code
+- `GET /get?country=XX` - Returns a newline-delimited list of CIDR blocks for the specified country code
 
-Example:
+### Without authentication
 
 ```bash
-curl "http://localhost:8080/get?country=us&auth=your-token"
+curl "http://localhost:8080/get?country=DE"
 ```
 
-If authentication is disabled (empty auth token), you can omit the auth parameter:
+### With authentication
+
+Start the service with an auth token (see [Configuration](#configuration)), then pass it via the `auth` query parameter:
 
 ```bash
-curl "http://localhost:8080/get?country=us"
+curl "http://localhost:8080/get?country=DE&auth=your-secret-token"
+```
+
+Requests without a valid token return `401 Unauthorized`.
+
+### Country codes
+
+Use [ISO 3166-1 alpha-2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) codes (case-insensitive):
+
+```bash
+curl "http://localhost:8080/get?country=RU"
+curl "http://localhost:8080/get?country=US"
+curl "http://localhost:8080/get?country=cn"
 ```
 
 ## Development
@@ -255,8 +283,8 @@ Releases are triggered automatically when you push a version tag:
 
 ```bash
 # Create and push a version tag
-git tag v1.2.3
-git push origin v1.2.3
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 The CI pipeline will:
@@ -264,9 +292,9 @@ The CI pipeline will:
 1. **Clone** the repository at the tagged commit
 2. **Test** - run `make ci` (mod-tidy, fmt, vet, test-verbose, test-race, test-cover)
 3. **Build** - compile binaries for all platforms:
-   - `ip-whitelist-linux-amd64-v1.2.3`
-   - `ip-whitelist-linux-arm64-v1.2.3`
-   - `ip-whitelist-linux-armv7-v1.2.3`
+   - `ip-whitelist-linux-amd64-v0.1.0`
+   - `ip-whitelist-linux-arm64-v0.1.0`
+   - `ip-whitelist-linux-armv7-v0.1.0`
 4. **GitHub Release** - create a release with binaries and checksums
 5. **Docker Build & Push** - build and push multi-arch images to Docker Hub
 
