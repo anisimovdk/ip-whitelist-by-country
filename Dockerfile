@@ -40,6 +40,9 @@ FROM alpine
 
 RUN apk add --no-cache ca-certificates
 
+# Create non-root user with GID 0 (root group) for OpenShift/Kubernetes compatibility
+RUN adduser -u 10001 -G root -H -D appuser
+
 # Copy version information build arguments to final stage
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown
@@ -63,8 +66,14 @@ LABEL go.version="${GO_VERSION}"
 # Copy the binary
 COPY --from=builder /build/ip-whitelist /app/ip-whitelist
 
+# Set ownership and permissions for GID-0 arbitrary-UID pattern
+RUN chown -R 10001:0 /app && chmod -R g=u /app
+
 # Expose port
 EXPOSE 8080
+
+# Run as non-root user
+USER 10001:0
 
 # Set the binary as entrypoint
 ENTRYPOINT ["/app/ip-whitelist"]

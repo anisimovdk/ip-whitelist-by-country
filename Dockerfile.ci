@@ -26,8 +26,18 @@ LABEL go.version="${GO_VERSION}"
 
 RUN apk add --no-cache ca-certificates
 
+# Create non-root user with GID 0 (root group) for OpenShift/Kubernetes compatibility
+RUN adduser -u 10001 -G root -H -D appuser
+
 COPY release/ip-whitelist-linux-${TARGETARCH}${TARGETVARIANT}-${VERSION} /app/ip-whitelist
 
+# Set ownership and permissions for GID-0 arbitrary-UID pattern
+RUN chown -R 10001:0 /app && chmod -R g=u /app
+
 EXPOSE 8080
+
+# Run as non-root user
+USER 10001:0
+
 ENTRYPOINT ["/app/ip-whitelist"]
 CMD ["--port=8080"]
